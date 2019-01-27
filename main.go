@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -19,6 +19,7 @@ var (
 	command      string
 	otherCommand string
 	rootDir      string
+	stopChannel  chan bool
 )
 
 func main() {
@@ -30,26 +31,23 @@ func main() {
 		printUsage()
 	}
 
-	// Print version
-	cyanPrint := color.New(color.FgCyan)
-	cyanPrint.Printf("[amon] 0.0.1\n")
-	cyanPrint.Printf("[amon] to restart at any time, enter `rs`\n")
-	cyanPrint.Printf("[amon] watching: *.*\n")
+	// get current directory
+	rootDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Print Info
+	PrintInfo(rootDir)
 
 	// Exec command in first run
 	greenPrint := color.New(color.FgGreen)
-	greenPrint.Printf("[amon] starting `go run main.go`\n")
-	execCommand(command)
+	greenPrint.Printf("[amon] starting `%s`\n", command)
+	ExecCommand(command)
 
 	// Exec other command if exist
 	if len(strings.TrimSpace(otherCommand)) > 0 {
-		execCommand(otherCommand)
-	}
-
-	// get current directory
-	rootDir, err := os.Getwd()
-	if err != nil {
-		log.Fatal(err)
+		ExecCommand(otherCommand)
 	}
 
 	// creates a new file watcher
@@ -58,7 +56,7 @@ func main() {
 
 	// starting at the root of the project, walk each files
 	// even in subdirectory
-	err = watchDir(rootDir)
+	err = WatchDir(rootDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -70,13 +68,12 @@ func main() {
 			select {
 			// watch for events
 			case event := <-watcher.Events:
-				fmt.Printf("EVENT! %#v\n", event)
+				// fmt.Printf("EVENT! %#v\n", event)
 
 				// create events
 				if event.Op&fsnotify.Create == fsnotify.Create {
-					fmt.Println("New Create")
 					// watch files refresh
-					err = watchDir(rootDir)
+					err = WatchDir(rootDir)
 					if err != nil {
 						log.Fatal(err)
 					}
@@ -85,15 +82,17 @@ func main() {
 				// write events
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					if !strings.Contains(event.Name, "/.") {
-						greenPrint.Printf("[amon] restarting due to changes...`\n")
-						greenPrint.Printf("[amon] starting `go run main.go`\n")
+						greenPrint.Printf("\n[amon] restarting due to changes...`\n")
+						greenPrint.Printf("[amon] starting `%s`\n", command)
+
+						stopChannel <- true
 
 						// Execute command
-						execCommand(command)
+						ExecCommand(command)
 
 						// Execute other command
 						if len(strings.TrimSpace(otherCommand)) > 0 {
-							execCommand(otherCommand)
+							ExecCommand(otherCommand)
 						}
 					}
 				}
@@ -119,6 +118,8 @@ func main() {
 }
 
 func init() {
+	stopChannel = make(chan bool)
+
 	flag.StringVarP(&command, "command", "c", "", "Command to run")
 	flag.StringVarP(&otherCommand, "otherCommand", "o", "", "Other Command to run")
 }
@@ -130,7 +131,8 @@ func printUsage() {
 	os.Exit(1)
 }
 
-func execCommand(command string) {
+// ExecCommand : taken from fresh
+func ExecCommand(command string) bool {
 	var cmd *exec.Cmd
 
 	// Split command by whitespace
@@ -145,33 +147,41 @@ func execCommand(command string) {
 		cmd = exec.Command(command)
 	}
 
-	var outb, errb bytes.Buffer
-	cmd.Stdout = &outb
-	cmd.Stderr = &errb
-	err := cmd.Run()
-
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// print stdout
-	if len(strings.TrimSpace(outb.String())) > 0 {
-		fmt.Printf("%s\n", outb.String())
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// print stderr
-	if len(strings.TrimSpace(errb.String())) > 0 {
-		fmt.Printf("%s\n", errb.String())
+	err = cmd.Start()
+	if err != nil {
+		log.Fatal(err)
 	}
+
+	go io.Copy(os.Stderr, stderr)
+	go io.Copy(os.Stdout, stdout)
+
+	go func() {
+		<-stopChannel
+		pid := cmd.Process.Pid
+		fmt.Printf("Killing PID %d\n", pid)
+		cmd.Process.Kill()
+	}()
+
+	return true
 }
 
-func watchDir(dirPath string) error {
+// WatchDir : add directory and files to watcher
+func WatchDir(dirPath string) error {
 	var err error
 
 	// Folder walk then ignore hidden folder
 	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if !strings.Contains(path, "/.") {
-			fmt.Println(path)
 			watcher.Add(path)
 		}
 
@@ -183,4 +193,14 @@ func watchDir(dirPath string) error {
 	}
 
 	return err
+}
+
+// PrintInfo : print info when start
+func PrintInfo(rootDir string) {
+	// Print version
+	fmt.Printf("> %s\n", rootDir)
+	cyanPrint := color.New(color.FgCyan)
+	cyanPrint.Printf("[amon] 0.0.1\n")
+	cyanPrint.Printf("[amon] to restart at any time, enter `rs`\n")
+	cyanPrint.Printf("[amon] watching: *.*\n")
 }

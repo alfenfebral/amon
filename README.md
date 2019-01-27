@@ -1,2 +1,5 @@
 # Amon
-File watcher for golang to restart server or doing specific commands.
+File watcher to build or doing specific commands in golang.
+
+## Usage
+amon -c "go build"
